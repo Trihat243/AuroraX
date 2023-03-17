@@ -1,0 +1,121 @@
+
+#if !defined(__i386__)
+#error "The Featherboot kernel needs to be compiled with an 'ix86-elf' compiler"
+#endif
+
+
+#include "boot/multiboot.h"
+#include "boot/elf.h"
+
+#include "common/printf.h"
+#include "common/string.h"
+#include "common/debug.h"
+
+#include "display/terminal.h"
+#include "display/vga.h"
+
+#include "interrupt/idt.h"
+
+#include "memory/gdt.h"
+#include "memory/paging.h"
+#include "memory/slabs.h"
+#include "memory/kheap.h"
+
+#include "process/process.h"
+#include "process/scheduler.h"
+
+#include "device/timer.h"
+#include "device/keyboard.h"
+#include "device/idedisk.h"
+
+#include "filesys/block.h"
+#include "filesys/vsfs.h"
+
+
+static inline void
+_init_message(char *msg)
+{
+    printf("[");
+    cprintf(VGA_COLOR_BLUE, "INIT");
+    printf("] %s...", msg);
+}
+
+static inline void
+_init_message_ok(void)
+{
+    cprintf(VGA_COLOR_GREEN, " OK\n");
+}
+
+
+/** The main function that `boot.s` jumps to. */
+void
+kernel_main(unsigned long magic, unsigned long addr)
+{
+   
+    terminal_init();
+    _init_message("Configuring VGA terminal display");
+    _init_message_ok();
+
+    if (magic != MULTIBOOT_BOOTLOADER_MAGIC)
+        error("invalid bootloader magic: %#x", magic);
+
+    multiboot_info_t *mbi = (multiboot_info_t *) addr;
+
+    _init_message("initializing debugging utilities");
+    debug_init(mbi);
+    _init_message_ok();
+
+    _init_message("setting up global descriptor table (GDT)");
+    gdt_init();
+    _init_message_ok();
+
+    _init_message("setting up interrupt descriptor table (IDT)");
+    idt_init();
+    _init_message_ok();
+
+    _init_message("kicking off the PIT timer & interrupts");
+    timer_init();
+    _init_message_ok();
+    info("timer frequency is set to %dHz", TIMER_FREQ_HZ);
+
+    _init_message("starting up PS/2 keyboard support");
+    keyboard_init();
+    _init_message_ok();
+
+    _init_message("configuring virtual memory using paging");
+    paging_init();
+    _init_message_ok();
+    info("supporting physical memory size: %3dMiB", NUM_FRAMES * 4 / 1024);
+    info("reserving memory for the kernel: %3dMiB", KMEM_MAX / 1024 / 1024);
+
+    _init_message("waking up kernel heap memory allocators");
+    page_slab_init();
+    kheap_init();
+    _init_message_ok();
+    info("kernel page SLAB list starts at %p", PAGE_SLAB_MIN);
+    info("kernel flexible heap  starts at %p", kheap_curr);
+
+    _init_message("waking up state & process structures");
+    cpu_init();
+    process_init();
+    _init_message_ok();
+    info("maximum number of processes: %d", MAX_PROCS);
+
+    _init_message("waking up IDE hard disk device driver");
+    idedisk_init();
+    _init_message_ok();
+
+    _init_message("waking up VSFS file system from disk");
+    filesys_init();
+    initproc_init();
+    _init_message_ok();
+    info("file system block size: %u KiB", BLOCK_SIZE);
+    info("file system image has %u blocks", superblock.fs_blocks);
+
+    asm volatile ( "sti" );
+
+    terminal_clear();
+    scheduler();
+
+    error("CPU leaves the scheduler loop, this should not happen!");
+}
